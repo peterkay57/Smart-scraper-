@@ -118,6 +118,20 @@ export default function App() {
     }
   };
 
+  const safeFetch = async (url: string, options?: RequestInit) => {
+    const response = await fetch(url, options);
+    const contentType = response.headers.get('content-type');
+    
+    if (!contentType || !contentType.includes('application/json')) {
+      const text = await response.text();
+      console.error(`[App Fetch Error] Expected JSON but got ${contentType}. Body:`, text.substring(0, 500));
+      throw new Error(`Server returned non-JSON response (${response.status}). The service may be experiencing issues.`);
+    }
+    
+    const data = await response.json();
+    return { data, ok: response.ok, status: response.status };
+  };
+
   const executeCrawl = async () => {
     if (!seedUrl || !isValidUrl(seedUrl) || crawling) return;
     setCrawling(true);
@@ -125,7 +139,7 @@ export default function App() {
     setDiscoveredLinks([]);
     
     try {
-      const response = await fetch('/api/crawl', {
+      const { data, ok } = await safeFetch('/api/crawl', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -135,8 +149,7 @@ export default function App() {
         })
       });
       
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Crawl failed');
+      if (!ok) throw new Error(data.error || 'Crawl failed');
       
       const links = data.links || [];
       setDiscoveredLinks(links);
@@ -184,14 +197,13 @@ export default function App() {
           const method = api === 'crawl4ai' ? 'POST' : 'GET';
           const body = api === 'crawl4ai' ? JSON.stringify({ url: link.url }) : undefined;
 
-          const response = await fetch(endpoint, {
+          const { data, ok } = await safeFetch(endpoint, {
             method,
             headers: { 'Content-Type': 'application/json' },
             body
           });
 
-          const data = await response.json();
-          if (response.ok) {
+          if (ok) {
             const result: ScrapeResult = {
               url: link.url,
               title: data.metadata?.title || `Extracted: ${link.asin || 'Resource'}`,
@@ -242,14 +254,13 @@ export default function App() {
         const method = api === 'crawl4ai' ? 'POST' : 'GET';
         const body = api === 'crawl4ai' ? JSON.stringify({ url: urlInput }) : undefined;
 
-        const response = await fetch(endpoint, {
+        const { data, ok } = await safeFetch(endpoint, {
           method,
           headers: { 'Content-Type': 'application/json' },
           body
         });
 
-        const data = await response.json();
-        if (response.ok) {
+        if (ok) {
           batchResults.push({
             url: urlInput,
             title: data.metadata?.title || 'Extracted Resource',
@@ -287,7 +298,7 @@ export default function App() {
 
     try {
       const combinedContent = results.map(r => `[Source: ${r.strategy}]\n${r.content}`).join('\n\n---\n\n');
-      const response = await fetch('/api/analyze', {
+      const { data, ok } = await safeFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -296,8 +307,7 @@ export default function App() {
         })
       });
 
-      const data = await response.json();
-      if (response.ok) {
+      if (ok) {
         setAnalysisResult(data.analysis);
         setStatus('AI Analysis Complete');
       } else {
@@ -322,7 +332,7 @@ export default function App() {
 
     try {
       const combinedContent = results.map(r => `[Source: ${r.strategy}]\n${r.content}`).join('\n\n---\n\n');
-      const response = await fetch('/api/analyze', {
+      const { data, ok } = await safeFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -331,9 +341,12 @@ export default function App() {
         })
       });
 
-      const data = await response.json();
-      setCsvResult(data.analysis);
-      setStatus('CSV Generation Complete');
+      if (ok) {
+        setCsvResult(data.analysis);
+        setStatus('CSV Generation Complete');
+      } else {
+        throw new Error(data.error || 'CSV generation failed');
+      }
     } catch (err: any) {
       setStatus(`CSV generation failed: ${err.message}`);
     } finally {

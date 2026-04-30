@@ -22,6 +22,20 @@ async function startServer() {
     return text.substring(0, maxLength) + '\n\n...[Content truncated due to length]...';
   }
 
+  // Helper: Secure JSON Fetch
+  async function safeJsonFetch(url: string, options?: RequestInit) {
+    const res = await fetch(url, options);
+    const contentType = res.headers.get('content-type');
+    
+    if (!contentType || !contentType.includes('application/json')) {
+      const text = await res.text();
+      console.error(`[Fetch Error] Expected JSON but got ${contentType}. Body: ${text.substring(0, 500)}`);
+      throw new Error(`External service returned non-JSON response (${res.status}). It might be down or returning an error page.`);
+    }
+    
+    return { data: await res.json(), status: res.status, ok: res.ok };
+  }
+
   // --- Scraper Proxy Endpoints ---
   app.get('/api/proxy/beautifulsoup', async (req, res) => {
     try {
@@ -86,16 +100,15 @@ async function startServer() {
       const baseCrawlUrl = "https://crawlee-3-jqtc.onrender.com";
       console.log(`[Crawler] Starting: ${url} (Pages: ${max_pages})`);
       
-      const startRes = await fetch(`${baseCrawlUrl}/crawl`, {
+      const { data: startData, status: startStatus, ok: startOk } = await safeJsonFetch(`${baseCrawlUrl}/crawl`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: JSON.stringify({ url: url, max_pages: Number(max_pages), use_js: Boolean(use_js) })
       });
 
-      const startData = await startRes.json();
-      if (!startRes.ok) {
+      if (!startOk) {
         console.error('[Crawler] API Error:', startData);
-        throw new Error(startData.detail ? JSON.stringify(startData.detail) : `API ${startRes.status}`);
+        throw new Error(startData.detail ? JSON.stringify(startData.detail) : `API ${startStatus}`);
       }
 
       const taskId = startData.job_id || startData.request_id;
@@ -111,9 +124,8 @@ async function startServer() {
 
       while (elapsed < maxWait) {
         try {
-          const pollRes = await fetch(`${baseCrawlUrl}/results/${taskId}`);
-          if (pollRes.ok) {
-            const pollData = await pollRes.json();
+          const { data: pollData, status: pollStatus, ok: pollOk } = await safeJsonFetch(`${baseCrawlUrl}/results/${taskId}`);
+          if (pollOk) {
             const status = (pollData.status || '').toLowerCase();
             console.log(`[Crawler] Poll Status: ${status || 'Checking...'}`);
 
@@ -203,34 +215,63 @@ async function startServer() {
     try {
       const { prompt, content } = req.body;
       const apiKey = process.env.Smartlinker_api || process.env.OPENROUTER_API_KEY;
-      if (!apiKey) return res.status(500).json({ error: 'AI API Key missing.' });
+      if (!apiKey) {
+        console.error('[AI] Missing API Key');
+        return res.status(500).json({ error: 'AI API Key missing. Please set Smartlinker_api or OPENROUTER_API_KEY.' });
+      }
 
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      // Truncate content specifically for Qwen-Plus (supports ~32k context)
+      // 30,000 chars is roughly 10k-15k tokens, leaving plenty of room for prompt/response.
+      const truncatedContent = truncateForAI(content || '', 40000); 
+
+      const payload = {
+        model: 'qwen/qwen-plus',
+        messages: [{ role: 'user', content: `${prompt}\n\nCONTENT:\n${truncatedContent}` }],
+        temperature: 0.1,
+        max_tokens: 4000
+      };
+
+      const { data, status: aiStatus, ok: aiOk } = await safeJsonFetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json', 'X-Title': 'SmartScraper' },
-        body: JSON.stringify({
-          model: 'qwen/qwen-plus',
-          messages: [{ role: 'user', content: `${prompt}\n\nCONTENT:\n${content}` }]
-        })
+        headers: { 
+          'Authorization': `Bearer ${apiKey}`, 
+          'Content-Type': 'application/json', 
+          'X-Title': 'SmartScraper' 
+        },
+        body: JSON.stringify(payload)
       });
-      const data = await response.json();
-      
-      if (!response.ok) {
-        console.error('[AI] OpenRouter Error:', data);
-        return res.status(response.status).json({ 
-          error: data.error?.message || `AI provider returned ${response.status}: ${JSON.stringify(data)}` 
+
+      if (!aiOk) {
+        console.error('[AI] OpenRouter Payload Sent:', JSON.stringify(payload).substring(0, 500) + '...');
+        console.error('[AI] OpenRouter Error Raw:', JSON.stringify(data, null, 2));
+        
+        let errorMessage = 'AI Service Provider Error';
+        if (data.error) {
+          if (typeof data.error === 'string') {
+            errorMessage = data.error;
+          } else {
+            // Drill down into nested error structures common in OpenRouter/Provider responses
+            errorMessage = data.error.message || data.error.code || JSON.stringify(data.error);
+          }
+        } else if (data.message) {
+          errorMessage = data.message;
+        }
+
+        return res.status(aiStatus).json({ 
+          error: `${errorMessage} (Provider Status: ${aiStatus})`
         });
       }
 
       const aiResponse = data.choices?.[0]?.message?.content;
       if (!aiResponse) {
+        console.error('[AI] Empty Response:', data);
         return res.status(500).json({ error: 'AI provider returned a success status but no generation content was found.' });
       }
 
       res.json({ analysis: aiResponse });
     } catch (err: any) {
       console.error('[AI] Handler Exception:', err.message);
-      res.status(500).json({ error: `AI Integration Error: ${err.message}` });
+      res.status(500).json({ error: `AI integration failed: ${err.message}` });
     }
   });
 

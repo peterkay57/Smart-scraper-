@@ -1,0 +1,6 @@
+{
+  "name": "SmartScraper",
+  "description": "Professional Data Extraction Engine with BeautifulSoup, Crawl4AI, and Playwright protocols.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

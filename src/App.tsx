@@ -124,8 +124,8 @@ export default function App() {
     
     if (!contentType || !contentType.includes('application/json')) {
       const text = await response.text();
-      console.error(`[App Fetch Error] Expected JSON but got ${contentType}. Body:`, text.substring(0, 500));
-      throw new Error(`Server returned non-JSON response (${response.status}). The service may be experiencing issues.`);
+      console.error(`[App Fetch Error] URL: ${url} | Content-Type: ${contentType} | Status: ${response.status}. Body:`, text.substring(0, 500));
+      throw new Error(`Endpoint ${url} returned non-JSON response (${response.status}). The service route may be missing or blocked.`);
     }
     
     const data = await response.json();

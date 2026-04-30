@@ -38,6 +38,7 @@ async function startServer() {
 
   // --- Scraper Proxy Endpoints ---
   app.get('/api/proxy/beautifulsoup', async (req, res) => {
+    console.log(`[Proxy] BeautifulSoup Request: ${req.query.url}`);
     try {
       const { url } = req.query;
       if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -55,6 +56,7 @@ async function startServer() {
   });
 
   app.post('/api/proxy/crawl4ai', async (req, res) => {
+    console.log(`[Proxy] Crawl4AI Request: ${req.body.url}`);
     try {
       const { url } = req.body;
       if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -74,6 +76,7 @@ async function startServer() {
   });
 
   app.get('/api/proxy/playwright', async (req, res) => {
+    console.log(`[Proxy] Playwright Request: ${req.query.url}`);
     try {
       const { url } = req.query;
       if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -91,6 +94,7 @@ async function startServer() {
 
   // --- Crawler Engine Endpoint (Updated for robustness) ---
   app.post('/api/crawl', async (req, res) => {
+    console.log('[API] /api/crawl hit');
     try {
       let { url, max_pages = 3, use_js = true } = req.body;
       if (!url) return res.status(400).json({ error: 'URL is required' });
@@ -212,6 +216,7 @@ async function startServer() {
 
   // AI Analysis Endpoint
   app.post('/api/analyze', async (req, res) => {
+    console.log('[API] /api/analyze hit');
     try {
       const { prompt, content } = req.body;
       const apiKey = process.env.Smartlinker_api || process.env.OPENROUTER_API_KEY;

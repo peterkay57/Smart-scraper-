@@ -5,8 +5,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-// ✅ Add this import for fetch in Node.js
-import fetch from 'node-fetch';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,7 +12,7 @@ const __dirname = path.dirname(__filename);
 async function startServer() {
   const app = express();
   
-  // ✅ FIXED: Use Render's PORT environment variable
+  // Use Render's PORT environment variable
   const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json({ limit: '50mb' }));
@@ -26,7 +24,7 @@ async function startServer() {
     return text.substring(0, maxLength) + '\n\n...[Content truncated due to length]...';
   }
 
-  // ✅ FIXED: Better error handling without assuming fetch is available
+  // ✅ FIXED: Robust JSON fetch that handles responses correctly
   async function safeJsonFetch(url: string, options?: RequestInit) {
     const res = await fetch(url, options);
     
@@ -98,7 +96,7 @@ async function startServer() {
     }
   });
 
-  // --- Crawler Engine Endpoint ---
+  // --- Crawler Engine Endpoint (Updated with fixed safeJsonFetch) ---
   app.post('/api/crawl', async (req, res) => {
     console.log('[API] /api/crawl hit');
     try {
@@ -115,7 +113,7 @@ async function startServer() {
         headers: { 
           'Content-Type': 'application/json', 
           'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (compatible; SmartScraper/1.0)'
+          'User-Agent': 'Mozilla/5.0 (compatible; SmartScraper/1.0; +https://smart-scraper.com)'
         },
         body: JSON.stringify({ url: url, max_pages: Number(max_pages), use_js: Boolean(use_js) })
       });
@@ -131,7 +129,7 @@ async function startServer() {
         throw new Error('No job_id or request_id returned from crawler API');
       }
 
-      const maxWait = 150000;
+      const maxWait = 150000; // 2.5 minutes
       const interval = 5000;
       let elapsed = 0;
       let rawLinks: any[] = [];
@@ -170,9 +168,10 @@ async function startServer() {
       }
 
       if (rawLinks.length === 0) {
-        throw new Error('Crawl timed out or yielded no results.');
+        throw new Error('Crawl timed out or yielded no results. The target site may be blocking headful discovery.');
       }
 
+      // Cleaning & Filtering Logic
       const cleanedData: { url: string; asin: string; type: 'product' | 'general' }[] = [];
       const seenUrls = new Set<string>();
       const productPattern = /\/(?:dp|product|gp\/product)\/([A-Z0-9]{10})/;
@@ -290,7 +289,7 @@ async function startServer() {
     app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
-  // ✅ FIXED: Bind to 0.0.0.0 with Render's PORT
+  // Bind to 0.0.0.0 with Render's PORT
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
   });

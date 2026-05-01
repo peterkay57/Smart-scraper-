@@ -5,13 +5,17 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+// ✅ Add this import for fetch in Node.js
+import fetch from 'node-fetch';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  
+  // ✅ FIXED: Use Render's PORT environment variable
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -22,18 +26,20 @@ async function startServer() {
     return text.substring(0, maxLength) + '\n\n...[Content truncated due to length]...';
   }
 
-  // Helper: Secure JSON Fetch
+  // ✅ FIXED: Better error handling without assuming fetch is available
   async function safeJsonFetch(url: string, options?: RequestInit) {
     const res = await fetch(url, options);
-    const contentType = res.headers.get('content-type');
     
-    if (!contentType || !contentType.includes('application/json')) {
+    // If not OK, throw error with status
+    if (!res.ok) {
       const text = await res.text();
-      console.error(`[Fetch Error] Expected JSON but got ${contentType}. Body: ${text.substring(0, 500)}`);
-      throw new Error(`External service returned non-JSON response (${res.status}). It might be down or returning an error page.`);
+      console.error(`[Fetch Error] HTTP ${res.status}: ${text.substring(0, 200)}`);
+      throw new Error(`API returned ${res.status}: ${res.statusText}`);
     }
     
-    return { data: await res.json(), status: res.status, ok: res.ok };
+    // Always try to parse as JSON
+    const data = await res.json();
+    return { data, status: res.status, ok: true };
   }
 
   // --- Scraper Proxy Endpoints ---
@@ -92,7 +98,7 @@ async function startServer() {
     }
   });
 
-  // --- Crawler Engine Endpoint (Updated for robustness) ---
+  // --- Crawler Engine Endpoint ---
   app.post('/api/crawl', async (req, res) => {
     console.log('[API] /api/crawl hit');
     try {
@@ -106,7 +112,11 @@ async function startServer() {
       
       const { data: startData, status: startStatus, ok: startOk } = await safeJsonFetch(`${baseCrawlUrl}/crawl`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json', 
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; SmartScraper/1.0)'
+        },
         body: JSON.stringify({ url: url, max_pages: Number(max_pages), use_js: Boolean(use_js) })
       });
 
@@ -121,7 +131,7 @@ async function startServer() {
         throw new Error('No job_id or request_id returned from crawler API');
       }
 
-      const maxWait = 150000; // 2.5 minutes
+      const maxWait = 150000;
       const interval = 5000;
       let elapsed = 0;
       let rawLinks: any[] = [];
@@ -133,7 +143,6 @@ async function startServer() {
             const status = (pollData.status || '').toLowerCase();
             console.log(`[Crawler] Poll Status: ${status || 'Checking...'}`);
 
-            // Detect completion based on status or presence of data
             const results = pollData.links || pollData.results || pollData.data?.links || (Array.isArray(pollData) ? pollData : null);
 
             if (status === 'completed' || status === 'finished' || status === 'success') {
@@ -146,7 +155,6 @@ async function startServer() {
               throw new Error(`Crawl job failed on server: ${pollData.message || 'The crawler encountered an internal error.'}`);
             }
 
-            // Fallback: If no status field but we have an array, the job might be finished
             if (!status && Array.isArray(results) && results.length > 0) {
               rawLinks = results;
               break;
@@ -162,16 +170,14 @@ async function startServer() {
       }
 
       if (rawLinks.length === 0) {
-        throw new Error('Crawl timed out or yielded no results. The target site may be blocking headful discovery.');
+        throw new Error('Crawl timed out or yielded no results.');
       }
 
-      // 3. Cleaning & Filtering Logic (Robust extraction)
       const cleanedData: { url: string; asin: string; type: 'product' | 'general' }[] = [];
       const seenUrls = new Set<string>();
       const productPattern = /\/(?:dp|product|gp\/product)\/([A-Z0-9]{10})/;
 
       for (let item of rawLinks) {
-        // Handle if item is a string or an object {url: '...'}
         let link = typeof item === 'string' ? item : (item.url || item.link || item.href);
         
         if (!link || typeof link !== 'string') continue;
@@ -203,7 +209,6 @@ async function startServer() {
         throw new Error('Zero valid links could be extracted from the crawl stream.');
       }
 
-      // Sort products to top
       cleanedData.sort((a,b) => (a.type === 'product' ? -1 : 1));
 
       res.json({ success: true, links: cleanedData });
@@ -225,8 +230,6 @@ async function startServer() {
         return res.status(500).json({ error: 'AI API Key missing. Please set Smartlinker_api or OPENROUTER_API_KEY.' });
       }
 
-      // Truncate content specifically for Qwen-Plus (supports ~32k context)
-      // 30,000 chars is roughly 10k-15k tokens, leaving plenty of room for prompt/response.
       const truncatedContent = truncateForAI(content || '', 40000); 
 
       const payload = {
@@ -247,7 +250,6 @@ async function startServer() {
       });
 
       if (!aiOk) {
-        console.error('[AI] OpenRouter Payload Sent:', JSON.stringify(payload).substring(0, 500) + '...');
         console.error('[AI] OpenRouter Error Raw:', JSON.stringify(data, null, 2));
         
         let errorMessage = 'AI Service Provider Error';
@@ -255,7 +257,6 @@ async function startServer() {
           if (typeof data.error === 'string') {
             errorMessage = data.error;
           } else {
-            // Drill down into nested error structures common in OpenRouter/Provider responses
             errorMessage = data.error.message || data.error.code || JSON.stringify(data.error);
           }
         } else if (data.message) {
@@ -289,8 +290,9 @@ async function startServer() {
     app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
+  // ✅ FIXED: Bind to 0.0.0.0 with Render's PORT
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
   });
 }
 

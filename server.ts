@@ -28,16 +28,74 @@ async function startServer() {
   async function safeJsonFetch(url: string, options?: RequestInit) {
     const res = await fetch(url, options);
     
-    // If not OK, throw error with status
     if (!res.ok) {
       const text = await res.text();
       console.error(`[Fetch Error] HTTP ${res.status}: ${text.substring(0, 200)}`);
       throw new Error(`API returned ${res.status}: ${res.statusText}`);
     }
     
-    // Always try to parse as JSON
     const data = await res.json();
     return { data, status: res.status, ok: true };
+  }
+
+  // ============================================
+  // MULTIPLE API KEYS WITH FALLBACK
+  // ============================================
+  
+  // Collect all available API keys
+  const API_KEYS = [
+    process.env.OPENROUTER_API_KEY_1,
+    process.env.OPENROUTER_API_KEY_2,
+    process.env.OPENROUTER_API_KEY_3,
+    process.env.OPENROUTER_API_KEY_4,
+    process.env.OPENROUTER_API_KEY_5,
+    process.env.Smartlinker_api
+  ].filter(key => key && key.trim() !== '');
+
+  console.log(`[API] Loaded ${API_KEYS.length} API keys for fallback`);
+
+  async function callAIWithFallback(prompt: string, content: string) {
+    const truncatedContent = truncateForAI(content || '', 40000);
+    
+    for (let i = 0; i < API_KEYS.length; i++) {
+      const apiKey = API_KEYS[i];
+      try {
+        console.log(`[AI] Trying key ${i + 1}/${API_KEYS.length}`);
+        
+        const payload = {
+          model: 'qwen/qwen-plus',
+          messages: [{ role: 'user', content: `${prompt}\n\nCONTENT:\n${truncatedContent}` }],
+          temperature: 0.1,
+          max_tokens: 4000
+        };
+
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: { 
+            'Authorization': `Bearer ${apiKey}`, 
+            'Content-Type': 'application/json', 
+            'X-Title': 'SmartScraper' 
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const aiResponse = data.choices?.[0]?.message?.content;
+          if (aiResponse) {
+            console.log(`[AI] ✅ Success with key ${i + 1}`);
+            return { success: true, analysis: aiResponse };
+          }
+        } else {
+          const errorText = await response.text();
+          console.log(`[AI] Key ${i + 1} failed: ${response.status} - ${errorText.substring(0, 100)}`);
+        }
+      } catch (err: any) {
+        console.log(`[AI] Key ${i + 1} error: ${err.message}`);
+      }
+    }
+    
+    return { success: false, error: 'All API keys exhausted or failed' };
   }
 
   // --- Scraper Proxy Endpoints ---
@@ -96,11 +154,11 @@ async function startServer() {
     }
   });
 
-  // --- Crawler Engine Endpoint (Updated with fixed safeJsonFetch) ---
+  // --- Crawler Engine Endpoint ---
   app.post('/api/crawl', async (req, res) => {
     console.log('[API] /api/crawl hit');
     try {
-      let { url, max_pages = 3, use_js = true } = req.body;
+      let { url, max_pages = 3, use_js = false } = req.body;
       if (!url) return res.status(400).json({ error: 'URL is required' });
 
       if (!url.startsWith('http')) url = 'https://' + url;
@@ -113,9 +171,9 @@ async function startServer() {
         headers: { 
           'Content-Type': 'application/json', 
           'Accept': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (compatible; SmartScraper/1.0; +https://smart-scraper.com)'
+          'User-Agent': 'Mozilla/5.0 (compatible; SmartScraper/1.0)'
         },
-        body: JSON.stringify({ url: url, max_pages: Number(max_pages), use_js: Boolean(use_js) })
+        body: JSON.stringify({ url: url, max_pages: Number(max_pages), use_js: false })
       });
 
       if (!startOk) {
@@ -129,7 +187,7 @@ async function startServer() {
         throw new Error('No job_id or request_id returned from crawler API');
       }
 
-      const maxWait = 150000; // 2.5 minutes
+      const maxWait = 150000;
       const interval = 5000;
       let elapsed = 0;
       let rawLinks: any[] = [];
@@ -140,7 +198,6 @@ async function startServer() {
           if (pollOk) {
             const status = (pollData.status || '').toLowerCase();
             console.log(`[Crawler] Poll Status: ${status || 'Checking...'}`);
-
             const results = pollData.links || pollData.results || pollData.data?.links || (Array.isArray(pollData) ? pollData : null);
 
             if (status === 'completed' || status === 'finished' || status === 'success') {
@@ -168,17 +225,15 @@ async function startServer() {
       }
 
       if (rawLinks.length === 0) {
-        throw new Error('Crawl timed out or yielded no results. The target site may be blocking headful discovery.');
+        throw new Error('Crawl timed out or yielded no results.');
       }
 
-      // Cleaning & Filtering Logic
       const cleanedData: { url: string; asin: string; type: 'product' | 'general' }[] = [];
       const seenUrls = new Set<string>();
       const productPattern = /\/(?:dp|product|gp\/product)\/([A-Z0-9]{10})/;
 
       for (let item of rawLinks) {
         let link = typeof item === 'string' ? item : (item.url || item.link || item.href);
-        
         if (!link || typeof link !== 'string') continue;
         
         if (link.startsWith('http://')) link = 'https://' + link.slice(7);
@@ -189,17 +244,9 @@ async function startServer() {
 
         const match = baseUrlOnly.match(productPattern);
         if (match) {
-          cleanedData.push({ 
-            url: baseUrlOnly, 
-            asin: match[1], 
-            type: 'product' 
-          });
+          cleanedData.push({ url: baseUrlOnly, asin: match[1], type: 'product' });
         } else {
-          cleanedData.push({ 
-            url: baseUrlOnly, 
-            asin: 'N/A', 
-            type: 'general' 
-          });
+          cleanedData.push({ url: baseUrlOnly, asin: 'N/A', type: 'general' });
         }
         seenUrls.add(baseUrlOnly);
       }
@@ -209,7 +256,6 @@ async function startServer() {
       }
 
       cleanedData.sort((a,b) => (a.type === 'product' ? -1 : 1));
-
       res.json({ success: true, links: cleanedData });
 
     } catch (err: any) {
@@ -218,62 +264,32 @@ async function startServer() {
     }
   });
 
-  // AI Analysis Endpoint
+  // ============================================
+  // AI ANALYSIS ENDPOINT WITH MULTIPLE API FALLBACK
+  // ============================================
   app.post('/api/analyze', async (req, res) => {
     console.log('[API] /api/analyze hit');
     try {
       const { prompt, content } = req.body;
-      const apiKey = process.env.Smartlinker_api || process.env.OPENROUTER_API_KEY;
-      if (!apiKey) {
-        console.error('[AI] Missing API Key');
-        return res.status(500).json({ error: 'AI API Key missing. Please set Smartlinker_api or OPENROUTER_API_KEY.' });
+      
+      if (!prompt && !content) {
+        return res.status(400).json({ error: 'Prompt or content is required' });
       }
 
-      const truncatedContent = truncateForAI(content || '', 40000); 
-
-      const payload = {
-        model: 'qwen/qwen-plus',
-        messages: [{ role: 'user', content: `${prompt}\n\nCONTENT:\n${truncatedContent}` }],
-        temperature: 0.1,
-        max_tokens: 4000
-      };
-
-      const { data, status: aiStatus, ok: aiOk } = await safeJsonFetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: { 
-          'Authorization': `Bearer ${apiKey}`, 
-          'Content-Type': 'application/json', 
-          'X-Title': 'SmartScraper' 
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!aiOk) {
-        console.error('[AI] OpenRouter Error Raw:', JSON.stringify(data, null, 2));
-        
-        let errorMessage = 'AI Service Provider Error';
-        if (data.error) {
-          if (typeof data.error === 'string') {
-            errorMessage = data.error;
-          } else {
-            errorMessage = data.error.message || data.error.code || JSON.stringify(data.error);
-          }
-        } else if (data.message) {
-          errorMessage = data.message;
-        }
-
-        return res.status(aiStatus).json({ 
-          error: `${errorMessage} (Provider Status: ${aiStatus})`
-        });
+      if (API_KEYS.length === 0) {
+        console.error('[AI] No API keys configured');
+        return res.status(500).json({ error: 'AI API Key missing. Please add OPENROUTER_API_KEY_1, OPENROUTER_API_KEY_2, etc. in Render environment variables.' });
       }
 
-      const aiResponse = data.choices?.[0]?.message?.content;
-      if (!aiResponse) {
-        console.error('[AI] Empty Response:', data);
-        return res.status(500).json({ error: 'AI provider returned a success status but no generation content was found.' });
+      const result = await callAIWithFallback(prompt || 'Summarize this content', content || '');
+      
+      if (!result.success) {
+        console.error('[AI] All keys failed:', result.error);
+        return res.status(503).json({ error: result.error || 'AI service unavailable. Please try again later.' });
       }
 
-      res.json({ analysis: aiResponse });
+      res.json({ analysis: result.analysis });
+      
     } catch (err: any) {
       console.error('[AI] Handler Exception:', err.message);
       res.status(500).json({ error: `AI integration failed: ${err.message}` });
@@ -289,9 +305,9 @@ async function startServer() {
     app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
-  // Bind to 0.0.0.0 with Render's PORT
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`✅ Loaded ${API_KEYS.length} API keys for fallback`);
   });
 }
 
